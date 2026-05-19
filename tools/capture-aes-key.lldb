@@ -1,0 +1,25 @@
+# Capture the Stick-DE3 DMX AES-128 key from the SYMBOLIZED old HardwareManager.
+#
+# Target: 2024-03-21 ESA2 build (symbol-rich; NOT the stripped EsaPro2 one).
+# Gladman AES: aes_encrypt_key128(const u8 *key, aes_encrypt_ctx *cx)
+#   x86_64 SysV at entry:  $rdi = ptr to 16-byte raw key,  $rsi = ctx
+#
+# ATTACH workflow (launch-under-lldb fails: Rosetta + hardened runtime):
+#   1. Open ESA2 Hardware Manager normally. Do NOT connect the Stick yet.
+#   2. PID=$(pgrep -f 'ESA2/HardwareManager/HardwareManager.app.*HardwareManager$')
+#   3. lldb -p "$PID" -s tools/capture-aes-key.lldb
+#   4. After it prints "continuing — connect the Stick now", in Hardware
+#      Manager connect to the Stick (192.168.96.2) and start DMX/live output.
+#
+# Each aes_encrypt_key128 hit prints the 16-byte key + caller backtrace
+# (the backtrace = the per-session key-derivation chain for the plugin).
+# IV not needed live: IV = aes_decrypt(C0) XOR P0 from a captured 576B frame.
+
+break set -n aes_encrypt_key128
+break command add -o "memory read --size 1 --format x --count 16 $rdi" -o "register read rdi rsi" -o "thread backtrace -c 16" -o "continue" 1
+
+break set -n aes_encrypt_key
+break command add -o "memory read --size 1 --format x --count 16 $rdi" -o "register read rdi rsi" -o "thread backtrace -c 16" -o "continue" 2
+
+script print(">>> breakpoints armed; continuing — connect the Stick now <<<")
+continue
