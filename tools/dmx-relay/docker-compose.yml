@@ -1,0 +1,23 @@
+# Stick-DE3 pacing relay — Portainer stack for server03.
+#
+# Deploy: Portainer -> Stacks -> Add stack -> "Repository" pointing at
+# tools/dmx-relay/ (or paste this file via "Web editor" and let it build).
+#
+# host networking so the container binds 2430/udp + 2431/tcp directly on
+# server03 and can route to the Stick on VLAN 96 with no NAT in the path.
+# Then point Hardware Manager / ESA Pro 2 at server03's IP.
+
+services:
+  dmx-relay:
+    build:
+      context: .
+    image: dmx-relay:latest
+    container_name: dmx-relay
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      STICK_IP: "192.168.96.2"
+      RATE_HZ: "40"            # DMX wire ceiling ~44 Hz; 40 is a safe default
+      STALE_MS: "2000"         # stop streaming 2s after Nicolaudie goes quiet
+      COALESCE_KEY_BYTES: "0"  # single universe (90 ch). >0 only if multi-universe
+      # UDP_PORT / TCP_PORT / BIND have sane defaults; override only if needed
