@@ -14,6 +14,30 @@ Homebridge plugin to control WAC Lighting CUBE Architectural DC-WD05 fixtures vi
 - RDM Personality: 4 (Enhanced Tuning, 5 channels per fixture)
 - DMX addresses: 1, 6, 11, 16, 21, 26, 31, 36, 41, 46, 51, 56, 61, 66, 71, 76, 81, 86
 
+### Physical fixture map
+
+9 positions (A–I) on the boat, each with an **up** and a **down** fixture
+(9 × 2 = 18). Nautical terms (bow = front, stern = back, port/stbd) for clarity.
+
+```
+            stern
+            G   H
+                    I
+ stbd  F            D  port
+       E            B
+            C   A
+            bow
+```
+
+| DMX | Pos | DMX | Pos | DMX | Pos |
+|-----|-----|-----|-----|-----|-----|
+|  1  | B up   | 31 | E down | 61 | I down |
+|  6  | A down | 36 | C down | 66 | B down |
+| 11  | E up   | 41 | C up   | 71 | I up   |
+| 16  | G up   | 46 | H down | 76 | G down |
+| 21  | H up   | 51 | F up   | 81 | D up   |
+| 26  | A up   | 56 | F down | 86 | D down |
+
 ### Channel Map (per fixture, 5 channels)
 
 | Slot | Name             | DMX Range | Notes                        |
@@ -84,8 +108,19 @@ Gotchas:
   (Reset wipes network + showfile but not these toward sane values).
 - After a Reset you must re-enter the static network *and* re-enable **WAN
   access** for network HWM control.
-- fw **3.08** is the newest (no firmware fix; the in-app changelog's recurring
-  fix is the MAC issue, not latency).
+- fw **3.08** is the newest *version*, but builds differ: installed build is
+  dated **2024-08-08**; a newer Hardware Manager (≈May 2026) bundles **3.08
+  built 2026-03-31** — a silent same-version rebuild (no changelog line will
+  reflect it). It *may* fix the absurd DMX-timing defaults and/or MAC/remote
+  bugs — unknown without Nicolaudie support or testing.
+- **Landmine:** the device works only because the DMX timing was hand-fixed;
+  any factory Reset / settings corruption (it rewrites settings+MAC constantly)
+  reintroduces the absurd defaults and the ~2–3 min lag. A planned update to
+  the 2026-03-31 build *might* remove this permanently — do it deliberately,
+  not reactively, and **first archive the currently-installed Hardware Manager
+  app/installer**: it is the ONLY firmware-rollback path (Nicolaudie publishes
+  no old firmware). When updating: record config, flash, then read the DMX
+  screen *before* changing anything (defaults may already be sane).
 
 ### Other notes
 
@@ -101,6 +136,25 @@ Gotchas:
 - Per-fixture HomeKit control still requires sending the **AES-128-CBC 576-byte
   DMX stream**; see [[stick-next-steps.md]]. (The latency fix above is
   independent and a prerequisite for that to be usable.)
+
+### Plugin architecture constraints (observed)
+
+- **No latch.** The Stick does NOT hold DMX values. When the live stream
+  stops, output drops (lights go off — it falls back to the standalone show,
+  which is currently empty). → the plugin must stream **continuously &
+  persistently** (e.g. ~25–40 Hz forever), not just on change. Homebridge
+  runs as a daemon, which suits this.
+- **Single session, mutually exclusive with HWM.** Only one TCP/2431 session;
+  while Hardware Manager is connected the Stick is unusable by anything else
+  (and vice-versa). Fine for production — HWM is commissioning-only; the
+  plugin owns the session at runtime. They cannot run simultaneously.
+- **Graceful-fallback option:** load a real (non-empty) standalone show with a
+  sensible "lights on" look so a stream/plugin outage degrades to that look
+  instead of full blackout. Trade-off vs. the empty-show baseline.
+- **Hard dependency:** the continuous stream is the **AES-128-CBC 576-byte**
+  encrypted DMX (Quick Trigger is scene-level, can't do per-fixture). So the
+  persistent sender is blocked on the cipher RE — this is now the critical
+  path. See [[stick-next-steps.md]].
 
 ## Reference
 
