@@ -54,19 +54,53 @@ When saturation > 0, it's in color mode using hue + saturation.
   **576-byte AES-128-CBC-encrypted frames** (see [[stick-protocol-reverse-engineering]]).
 - **UDP/2430 broadcast** — device discovery only.
 
-### Known issues (not network-rate)
+### Required device setup (CRITICAL — fixes the multi-minute lag)
+
+Symptom (now resolved): every DMX change — from any source (HWM faders, ESA
+Pro 2, raw stream) — applied a **consistent ~2–3 min late, then snapped**.
+
+Root cause: the Stick's **DMX output wire-timing** was set to absurd values
+(MBB 15000 / Break 1000 / MAB 1500 / **MBS 400**). MBS is applied between all
+512 slots every frame, so the output engine emitted frames so slowly that live
+input backed up in the device's FIFO for minutes. NOT a network/AES/show/fade
+problem — all of those were investigated and ruled out.
+
+Fix: **USB-connect Hardware Manager** → the DMX/fader screen → set
+**Standard/Recommended**:
+
+| Param | Good value |
+|-------|-----------|
+| MBB (Mark Before Break) | 100 |
+| Break | 180 |
+| MAB (Mark After Break) | 20 |
+| MBS (Mark Between Slots) | 4 |
+
+(≈ 40 Hz / ~348 fps figure shown). Lights then change instantly, over USB
+**and** the network.
+
+Gotchas:
+- This DMX-timing screen exists **only in USB-connected Hardware Manager** —
+  it is NOT in the network config, and a **factory Reset does NOT fix it**
+  (Reset wipes network + showfile but not these toward sane values).
+- After a Reset you must re-enter the static network *and* re-enable **WAN
+  access** for network HWM control.
+- fw **3.08** is the newest (no firmware fix; the in-app changelog's recurring
+  fix is the MAC issue, not latency).
+
+### Other notes
 
 - Hardware Manager / ESA Pro 2 send a tame, steady **25 Hz** stream — *not* a
-  flood. A pacing relay/bridge was built, deployed, and **disproven** by
-  capture; do not revisit it.
-- Faders apply ~2–3 min late then **snap** (not fade) → Stick-side
-  queue / slow-consumer of the encrypted stream, likely the stored `DEFAULT`
-  show starving the live-IP path. Independent of network rate.
-- First Connect after launching Hardware Manager always fails **XHL 17**;
-  the retry succeeds → stale single TCP/2431 session slot freed by the
-  failed attempt.
-- Real fix path: finish the AES-128-CBC key/IV recovery so this plugin drives
-  the Stick directly at a sustainable rate. See [[stick-next-steps.md]].
+  flood. A pacing relay/bridge was built, deployed, and **disproven**; do not
+  revisit it.
+- First Connect after launching Hardware Manager often fails **XHL 17**; the
+  retry succeeds → stale single TCP/2431 session slot freed by the failed
+  attempt. The plugin should auto-retry and close its session cleanly.
+- `tools/quick-trigger.mjs` — spec-verified UDP/2430 Quick Trigger (scene-level
+  only; not actioned on fw3.08 unless "Security for Cloud Access" is off).
+  `tools/stick-status.mjs` — reads the TCP/2431 status packet (Live-Mode flag).
+- Per-fixture HomeKit control still requires sending the **AES-128-CBC 576-byte
+  DMX stream**; see [[stick-next-steps.md]]. (The latency fix above is
+  independent and a prerequisite for that to be usable.)
 
 ## Reference
 

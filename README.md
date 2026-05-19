@@ -27,14 +27,17 @@ npm run build
 
 Then add the platform to your Homebridge config (see `stick-de3.json`).
 
-## Investigation notes
+## Required device setup
 
-A network "pacing relay" was tried and **disproven** — packet captures show
-Hardware Manager / ESA Pro 2 send a tame, steady 25 Hz / ~115 kbit/s stream,
-not a flood. The real symptom (faders apply ~2–3 min late, then *snap*) is a
-**Stick-side queue / slow-consumer** problem, independent of network rate.
-A relay/bridge cannot fix it; the path forward is the AES-128-CBC decryption
-work so this plugin can drive the Stick directly at a sustainable rate.
+The Stick must have sane **DMX output timing** or every change applies ~2–3 min
+late then snaps. Set it via **USB-connected Hardware Manager** → DMX screen →
+**Standard/Recommended** (MBB 100 / Break 180 / MAB 20 / MBS 4). This screen is
+USB-only and a factory Reset does **not** fix it. See `CLAUDE.md` →
+"Required device setup" for the full story and gotchas.
+
+A network "pacing relay" was tried and **disproven** (captures show a tame
+25 Hz stream, not a flood); that detour is closed. Per-fixture control still
+needs the AES-128-CBC 576-byte DMX stream — the original project work.
 
 ## License
 
