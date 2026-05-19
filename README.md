@@ -7,8 +7,9 @@ fixtures via a **Nicolaudie Stick-DE3** DMX controller.
 
 - 18× WAC DC-WD05 fixtures on a DMX chain
 - Nicolaudie Stick-DE3 wall-mount DMX controller at `192.168.96.2`
-- The Stick exposes a network interface (UDP 2430 / TCP 2431) carrying raw
-  DMX channel values
+- TCP/2431 = control + per-session crypto handshake (`LSAG_ALL`/`Stick_3A`);
+  UDP→`192.168.96.2:2431` = the AES-128-CBC-encrypted 576-byte DMX frames;
+  UDP/2430 broadcast = device discovery
 - This plugin bridges HomeKit ↔ DMX via Homebridge
 
 Each fixture uses RDM Personality 4 (Enhanced Tuning, 5 channels): intensity
@@ -26,29 +27,14 @@ npm run build
 
 Then add the platform to your Homebridge config (see `stick-de3.json`).
 
-## Tools
+## Investigation notes
 
-### `tools/dmx-relay/` — Stick-DE3 pacing relay
-
-Nicolaudie Hardware Manager / ESA Pro 2 floods the Stick with UDP far faster
-than DMX's ~44 Hz wire ceiling. The Stick's network task starves its DMX
-engine (lights freeze / stay on) and its single TCP control session never
-frees, so you can't reconnect after restarting the software without a
-power-cycle.
-
-`tools/dmx-relay/` is a zero-dependency Node relay (Dockerized, deployed as a
-Portainer stack on `server03` with host networking) that sits between the
-Nicolaudie software and the Stick:
-
-- **UDP/2430** — last-frame-wins coalescing, forwarded at a fixed rate
-  (default 40 Hz). The flood is dropped, not buffered.
-- **TCP/2431** — transparent proxy, one session at a time; a reconnecting
-  client hard-RSTs the previous session so the Stick immediately frees its
-  slot (this is the reconnect fix).
-
-Point Hardware Manager / ESA Pro 2 at server03's IP instead of
-`192.168.96.2`. Full rationale, deploy steps, and tuning knobs in
-[`tools/dmx-relay/README.md`](tools/dmx-relay/README.md).
+A network "pacing relay" was tried and **disproven** — packet captures show
+Hardware Manager / ESA Pro 2 send a tame, steady 25 Hz / ~115 kbit/s stream,
+not a flood. The real symptom (faders apply ~2–3 min late, then *snap*) is a
+**Stick-side queue / slow-consumer** problem, independent of network rate.
+A relay/bridge cannot fix it; the path forward is the AES-128-CBC decryption
+work so this plugin can drive the Stick directly at a sustainable rate.
 
 ## License
 

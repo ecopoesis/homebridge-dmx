@@ -42,27 +42,31 @@ When saturation > 0, it's in color mode using hue + saturation.
 ## Stick-DE3 Network
 
 - Static IP: 192.168.96.2 (on dedicated /30 VLAN, ID 96)
-- Control ports: UDP 2430, TCP 2431
-- The Stick's TCP interface sends/receives raw DMX channel values
 - The Stick changes its MAC address on every settings update (this is "a feature")
 
-## DMX Pacing Relay (`tools/dmx-relay/`)
+### Protocol (observed via packet capture)
 
-The Stick gets overwhelmed by Nicolaudie Hardware Manager / ESA Pro 2's UDP
-live stream: a gigabit PC sends far faster than DMX's ~44 Hz wire ceiling, so
-the Stick's network task starves its DMX engine (lights freeze/stay on) and the
-single TCP/2431 session never frees (can't reconnect without a power-cycle).
+- **TCP/2431** — control + per-session crypto handshake. Client sends
+  `LSAG_ALL\x00\x00\x15\x00\x00\x00`; Stick replies
+  `Stick_3A\x00\xc9\x00DEFAULT\x00…` (carries device name/identity). Short
+  probe connections close in ~30 ms (normal); one long-lived control session.
+- **UDP → 192.168.96.2:2431** (src port 2430) — the live DMX stream:
+  **576-byte AES-128-CBC-encrypted frames** (see [[stick-protocol-reverse-engineering]]).
+- **UDP/2430 broadcast** — device discovery only.
 
-`tools/dmx-relay/` is a zero-dependency Node relay (Dockerized, runs as a
-Portainer stack on server03 with host networking) that sits in the path:
+### Known issues (not network-rate)
 
-- **UDP/2430** — last-frame-wins coalescing, forwarded at a fixed `RATE_HZ`
-  (default 40). The flood is dropped, not buffered.
-- **TCP/2431** — transparent proxy, one session at a time; a reconnecting
-  client hard-RSTs the previous session so the Stick frees its slot.
-
-Point Hardware Manager / ESA Pro 2 at server03's IP instead of 192.168.96.2.
-See `tools/dmx-relay/README.md` for deploy + tuning.
+- Hardware Manager / ESA Pro 2 send a tame, steady **25 Hz** stream — *not* a
+  flood. A pacing relay/bridge was built, deployed, and **disproven** by
+  capture; do not revisit it.
+- Faders apply ~2–3 min late then **snap** (not fade) → Stick-side
+  queue / slow-consumer of the encrypted stream, likely the stored `DEFAULT`
+  show starving the live-IP path. Independent of network rate.
+- First Connect after launching Hardware Manager always fails **XHL 17**;
+  the retry succeeds → stale single TCP/2431 session slot freed by the
+  failed attempt.
+- Real fix path: finish the AES-128-CBC key/IV recovery so this plugin drives
+  the Stick directly at a sustainable rate. See [[stick-next-steps.md]].
 
 ## Reference
 
