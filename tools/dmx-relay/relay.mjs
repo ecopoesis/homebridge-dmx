@@ -96,6 +96,9 @@ udpSock.bind(UDP_PORT, BIND, () => {
 // ---------------------------------------------------------------------------
 
 let session = null; // { client, upstream }
+let connSeq = 0;
+let activeClients = 0;
+const DEBUG = process.env.DEBUG !== '0'; // byte-level handshake tracing
 
 function hardKill(sock) {
   if (!sock || sock.destroyed) return;
@@ -114,41 +117,67 @@ function teardown(reason) {
 }
 
 const tcpServer = net.createServer((client) => {
-  log(`TCP client connected ${client.remoteAddress}:${client.remotePort}`);
+  const id = ++connSeq;
+  const t0 = Date.now();
+  activeClients++;
+  log(`[#${id}] TCP client connected ${client.remoteAddress}:${client.remotePort}  (activeClients=${activeClients})`);
+  if (activeClients > 1) {
+    log(`[#${id}] *** OVERLAP: ${activeClients} client connections at once — Connect likely opens multiple sockets; single-session RST may be breaking the handshake`);
+  }
 
   // One session at a time. A reconnecting Hardware Manager must not be
   // blocked by the previous wedged socket.
-  if (session) teardown('superseded by new client');
+  if (session) {
+    const age = ((Date.now() - session.t0) / 1000).toFixed(1);
+    log(`[#${id}] superseding session #${session.id} (age ${age}s, handshake ${session.gotStickHello ? 'completed' : 'NEVER completed'})`);
+    teardown(`superseded by client #${id}`);
+  }
 
   const upstream = net.connect({ host: STICK_IP, port: STICK_TCP_PORT });
   upstream.setNoDelay(true);
   client.setNoDelay(true);
 
-  const thisSession = { client, upstream };
+  const thisSession = { client, upstream, id, t0, gotStickHello: false };
   session = thisSession;
 
   const connectTimer = setTimeout(() => {
     if (session === thisSession && upstream.connecting) {
-      log(`TCP upstream connect timeout to ${STICK_IP}:${STICK_TCP_PORT}`);
+      log(`[#${id}] TCP upstream connect timeout to ${STICK_IP}:${STICK_TCP_PORT}`);
       teardown('upstream connect timeout');
     }
   }, 5000);
 
   upstream.on('connect', () => {
     clearTimeout(connectTimer);
-    log(`TCP upstream established -> ${STICK_IP}:${STICK_TCP_PORT}`);
+    log(`[#${id}] TCP upstream established -> ${STICK_IP}:${STICK_TCP_PORT}`);
+    if (DEBUG) {
+      let cHead = false, uHead = false;
+      client.on('data', (d) => {
+        if (!cHead) { cHead = true;
+          log(`[#${id}] C->S first ${d.length}B: ${d.subarray(0, 32).toString('hex')} | ${JSON.stringify(d.subarray(0, 16).toString('latin1'))}`); }
+      });
+      upstream.on('data', (d) => {
+        if (!uHead) { uHead = true;
+          thisSession.gotStickHello = true;
+          log(`[#${id}] S->C first ${d.length}B: ${d.subarray(0, 32).toString('hex')} | ${JSON.stringify(d.subarray(0, 16).toString('latin1'))}  <-- STICK RESPONDED`); }
+      });
+    }
     client.pipe(upstream);
     upstream.pipe(client);
   });
 
   const onEnd = (who) => () => {
-    if (session === thisSession) teardown(`${who} closed`);
+    if (session === thisSession) {
+      const age = ((Date.now() - t0) / 1000).toFixed(1);
+      teardown(`#${id} ${who} closed after ${age}s, stick ${thisSession.gotStickHello ? 'had responded' : 'NEVER responded'}`);
+    }
   };
   const onErr = (who) => (err) => {
-    if (session === thisSession) teardown(`${who} error: ${err.message}`);
+    if (session === thisSession) teardown(`#${id} ${who} error: ${err.message}`);
     else hardKill(who === 'client' ? client : upstream);
   };
 
+  client.on('close', () => { activeClients--; });
   client.on('close', onEnd('client'));
   client.on('error', onErr('client'));
   upstream.on('close', onEnd('upstream'));
