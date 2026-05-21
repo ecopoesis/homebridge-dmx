@@ -11,11 +11,17 @@ Static RE *replaces* the prior interactive-lldb attempts (see
 `memory/stick-aes-symbolized-breakthrough.md` for what didn't work, and
 `memory/stick-cipher-is-stream-not-aes.md` for what's now known).
 
-## TL;DR — the cipher is NOT AES
+## TL;DR — the cipher IS AES-128 (with mode dispatch)
 
-Prior live-RE / `try-decrypt.ts` heuristics had this misidentified as
-AES-128-CBC. Static RE proves it is a **custom small-state stream cipher**
-(8 × u32 state, ISAAC-style shift-XOR-and-table-lookup mixers). The
+The Stick3 DMX cipher is **AES-128** (custom-inlined, not Gladman), running
+in CBC or CFB mode depending on a flag in the cipher state. Earlier in this
+RE session I briefly concluded "stream cipher, not AES" — that was wrong;
+I had been looking at a sibling class (`XHL_DasEccStreamCryptography`, used
+for USB devices) whose encrypt path uses a small-state stream cipher. The
+*Stick3 ANet* path doesn't go through that. The real AES path is via
+`FUN_100107950` → `FUN_1003f6790` (CBC) / `FUN_1003f5140` (CFB) → block
+cipher at `FUN_1003f5980` / `FUN_1003f4690` with S-box at `DAT_1007c0010`.
+
 576-byte DMX frame format:
 
 ```
@@ -26,8 +32,8 @@ AES-128-CBC. Static RE proves it is a **custom small-state stream cipher**
 +0x14 (2B)   channel count (≤512)
 +0x16 (1B)   100              constant
 +0x17 (1B)   seq_counter++
-+0x18 (8B)   8 random bytes   nonce
-+0x20 (544B) ENCRYPTED        XOR with keystream from FUN_1005e0530
++0x18 (8B)   8 random bytes   nonce / first-block IV seed
++0x20 (544B) ENCRYPTED        AES-128 (CBC or CFB) — 34 blocks of 16 bytes
 ```
 
 ## Key addresses
@@ -40,10 +46,18 @@ AES-128-CBC. Static RE proves it is a **custom small-state stream cipher**
 | 0x1001a9d50 | `Stick3CryptDmxUniverse` "send DMX" (vt[22] primary) |
 | 0x1001eeac0 | Frame-build wrapper                                  |
 | 0x1001ee990 | Build encrypted frame                                |
-| 0x100108200 | **The encrypt function** (XOR with keystream)        |
-| 0x1005e0530 | **Keystream generator** (8-state LFSR)               |
+| **0x100107950** | **Real encrypt entry** (mode-dispatch CBC vs CFB) |
+| 0x1003f5140 | AES-CFB outer (uses IV at +0xB0)                     |
+| **0x1003f4690** | **AES-128 block cipher (CFB path, 1153 B)**      |
+| 0x1003f6790 | AES-CBC outer (chains with previous ciphertext)      |
+| **0x1003f5980** | **AES-128 block cipher (CBC path, 1872 B)**      |
+| **DAT_1007c0010** | **AES S-box** (256 bytes)                      |
 | 0x1001b0340 | `XHL_UdpSocket::send`                                |
 | 0x100677060 | `sendto` wrapper                                     |
+
+The earlier "stream cipher" addresses (`FUN_100108200`, `FUN_1005e0530`) are
+for `XHL_DasEccStreamCryptography` — a sibling class for USB devices, NOT
+on the Stick3 DMX path.
 
 Typeinfo addresses (for further vtable hunting via `dyld_info -fixups`):
 

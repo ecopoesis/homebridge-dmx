@@ -75,10 +75,11 @@ When saturation > 0, it's in color mode using hue + saturation.
   `Stick_3A\x00\xc9\x00DEFAULT\x00…` (carries device name/identity). Short
   probe connections close in ~30 ms (normal); one long-lived control session.
 - **UDP → 192.168.96.2:2431** (src port 2430) — the live DMX stream:
-  **576-byte frames = 32-byte clear header + 544-byte body XOR'd with a
-  custom small-state stream cipher** (NOT AES — early misidentification;
-  see `tools/ghidra/README.md` and
-  `memory/stick-cipher-is-stream-not-aes.md` for the static-RE findings).
+  **576-byte frames = 32-byte clear header + 544-byte AES-128 body**
+  (CBC or CFB mode selectable by a flag in the cipher state; mode for the
+  live Stick3 path TBD). Custom-inlined AES (S-box @ `DAT_1007c0010`), not
+  Gladman library. See `tools/ghidra/README.md` and
+  `memory/stick-cipher-is-stream-not-aes.md` for the static-RE findings.
 - **UDP/2430 broadcast** — device discovery only.
 
 ### Required device setup (CRITICAL — fixes the multi-minute lag)
@@ -156,11 +157,13 @@ Gotchas:
   sensible "lights on" look so a stream/plugin outage degrades to that look
   instead of full blackout. Trade-off vs. the empty-show baseline.
 - **Hard dependency:** the continuous stream is the **encrypted 576-byte DMX**
-  (32-byte header + 544-byte stream-cipher payload — *not* AES; static RE
-  pinned this down). Quick Trigger is scene-level, can't do per-fixture. So
-  the persistent sender is blocked on (1) re-implementing the keystream
-  function `FUN_1005e0530` and (2) recovering its initial state from the
-  TCP/2431 handshake. See `tools/ghidra/README.md`.
+  (32-byte clear header + 544-byte AES-128 body, custom-inlined AES with
+  S-box at `DAT_1007c0010`). Mode is CBC or CFB, selected by a byte in the
+  cipher state (live Stick3 path mode TBD). Quick Trigger is scene-level,
+  can't do per-fixture. So the persistent sender is blocked on (1) recovering
+  the per-session AES key from the TCP/2431 handshake and (2) the first-block
+  IV setup. See `tools/ghidra/README.md` and
+  `memory/stick-cipher-is-stream-not-aes.md`.
 
 ## Reference
 
