@@ -9,6 +9,9 @@ tools/ghidra/out*/
 # RE captures / scratch
 tools/aes-hook.dylib
 tools/scan-results-*.log
+
+# Network captures (per-session, contain ephemeral keys; reproducible locally)
+tools/captures/
 tools/.omc/
 tools/dmx-relay/.omc/
 .omc/

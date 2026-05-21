@@ -18,7 +18,7 @@ cd "$(dirname "$0")/.."
 
 IFACE="${IFACE:-en0}"
 STICK_IP="${STICK_IP:-192.168.96.2}"
-DUR="${DUR:-20}"
+DUR="${DUR:-60}"
 PCAP=/tmp/stick-handshake.pcap
 
 mkdir -p tools/captures
