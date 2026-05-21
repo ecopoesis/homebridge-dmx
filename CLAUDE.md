@@ -144,11 +144,15 @@ Gotchas:
 
 ### Plugin architecture constraints (observed)
 
-- **No latch.** The Stick does NOT hold DMX values. When the live stream
-  stops, output drops (lights go off — it falls back to the standalone show,
-  which is currently empty). → the plugin must stream **continuously &
-  persistently** (e.g. ~25–40 Hz forever), not just on change. Homebridge
-  runs as a daemon, which suits this.
+- **Latch IS supported — on clean disconnect** (corrected 2026-05-20; the
+  earlier "no latch / must stream" note was wrong). The Stick holds DMX
+  values after a *clean* TCP disconnect; output only drops when the session
+  is dirty-dropped (TCP timeout, process kill, the current 2025-09-23
+  EsaPro2 HWM's bugged disconnect). Implication: the plugin can be
+  **transactional** — connect → ECDH handshake → send DMX → clean
+  disconnect → Stick holds the value. No persistent streaming needed.
+  Trade-off: a few hundred ms wall-controller blink per change. See
+  `memory/stick-actually-latches-on-clean-disconnect.md`.
 - **Single session, mutually exclusive with HWM.** Only one TCP/2431 session;
   while Hardware Manager is connected the Stick is unusable by anything else
   (and vice-versa). Fine for production — HWM is commissioning-only; the
