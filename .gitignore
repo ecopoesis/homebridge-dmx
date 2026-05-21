@@ -1,0 +1,15 @@
+node_modules/
+dist/
+package-lock.json
+
+# Ghidra project files — large binary blobs, regenerable via the scripts in tools/ghidra/
+tools/ghidra/HwmESA2*
+tools/ghidra/out*/
+
+# RE captures / scratch
+tools/aes-hook.dylib
+tools/scan-results-*.log
+tools/.omc/
+tools/dmx-relay/.omc/
+.omc/
+.claude/
