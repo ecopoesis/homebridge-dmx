@@ -38,9 +38,10 @@
 // big-endian (SEC1), so we byte-reverse at every boundary. The installed AES
 // key is the little-endian form of  X(d·S) XOR X(d·Q).
 //
-//   ⚠ The LE/BE handling and the 0x0F wire layout are read off the
-//   decompilation but NOT yet checked against a live capture. Verify the
-//   derived key decrypts a real 576-byte frame before trusting it in prod.
+//   ✓ VERIFIED end-to-end (2026-05-21): this derivation reproduces the exact
+//   AES-256 key installed in a real captured session — checked against an
+//   lldb-dumped ephemeral `d` + the Stick pubkey from the handshake pcap.
+//   See tools/verify-kdf.mjs.
 // ════════════════════════════════════════════════════════════════════════
 //
 // Usage:  node tools/derive-dmx-key.mjs            (runs the self-test)
@@ -58,12 +59,15 @@ export const P256 = {
 };
 
 // ── The hardcoded static public point S, recovered from the binary ──────────
-// In the app it is 33 obfuscated bytes at file 0x7b0490, XOR-decoded with the
-// incrementing mask 0x51,0x52,…,0x71. Decoded => [prefix 0x52][32-byte X].
-// FUN_100402ab0 uses only prefix bit0 (=0 => even Y) and SEC1-decompresses.
-export const STATIC_POINT_X =
-  '7a5b46c56f3a5e670b4f0e338727d94737ec0fc4af0dba93a51d93965191d08f';
-export const STATIC_POINT_COMPRESSED = Buffer.from('02' + STATIC_POINT_X, 'hex');
+// A 33-byte SEC1-compressed P-256 point stored VERBATIM at file offset
+// 0x7b0490 (vmaddr 0x1007b0490). prefix 0x03 => odd Y. vt[0x38] hands this
+// raw buffer straight to the SEC1 decompressor. (An earlier RE pass XOR-masked
+// these bytes with 0x51,0x52,… — that produced a different value used
+// elsewhere in the app; it is NOT the KDF static point. The raw bytes below
+// are the ones that reproduce a real session's key — see verify-kdf.mjs.)
+export const STATIC_POINT_COMPRESSED = Buffer.from(
+  '0328081290396d063e5114526ed978b926558f6ba1c96ad2facf76fffb3ffea0fe', 'hex');
+export const STATIC_POINT_X = STATIC_POINT_COMPRESSED.subarray(1, 33).toString('hex');
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 const rev = (b) => Buffer.from(b).reverse();
