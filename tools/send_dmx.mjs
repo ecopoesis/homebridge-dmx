@@ -132,11 +132,20 @@ async function handshake(sock) {
     log('0x47 ok — got Stick handshake key');
   } else log('0x47 — no reply (continuing)');
 
-  // 2. 0x48 — software name ‖ stick pub (echoed) ‖ our pub
+  // 2. 0x48 — software name ‖ stick pub (echoed) ‖ our X25519 pubkey.
+  //    fw2+ requires TCP auth: this is a real X25519 ECDH. The 0x48 reply
+  //    status is 0 only for a valid public key — random bytes => 100 (the
+  //    Stick then never promotes the connection to a live control session).
   const software = Buffer.alloc(32); software.write('software');
-  const ourX25519 = crypto.randomBytes(32);   // X25519 secret is unused downstream
+  const x25519 = crypto.generateKeyPairSync('x25519');
+  const ourX25519 = Buffer.from(
+    x25519.publicKey.export({ type: 'spki', format: 'der' }).subarray(-32));
   sock.write(msg(LSAG, 0x48, token(), software, stickX25519, ourX25519));
-  await sleep(120);
+  const r48 = await waitFor(() => findMsg(0x48, 22), 2000);
+  if (r48) {
+    const st = r48.readUInt32LE(0x12);
+    log(`0x48 auth status: ${st}` + (st === 0 ? ' (ok)' : ' (REJECTED)'));
+  } else log('0x48 — no reply');
 
   // 3. observed pre-DMX chatter (replayed; payloads as captured)
   sock.write(msg(MAGIC, 0x46, Buffer.alloc(4)));
@@ -165,6 +174,20 @@ async function handshake(sock) {
   // 6. derive the DMX session key (KDF: P-256 double-ECDH)
   const key = deriveDmxKey(ecdh, wireToPoint(Qwire));
   log('DMX key derived:', key.toString('hex'));
+
+  // 7. enter live mode. In the captured HWM session the DMX stream begins
+  //    only after this 0x75/0x74/0x2e/0x10/0x11 sequence; the long 0x70
+  //    showfile download HWM does in between is editor-only and is skipped.
+  sock.write(msg(MAGIC, 0x75, token()));
+  sock.write(msg(MAGIC, 0x74, token()));
+  await sleep(150);
+  sock.write(msg(MAGIC, 0x2e, Buffer.alloc(32)));        // 0x2e: 32-byte payload, no token
+  await sleep(150);
+  sock.write(msg(MAGIC, 0x10, token()));
+  await sleep(150);
+  sock.write(msg(MAGIC, 0x11, token()));                 // "go live"
+  const r11 = await waitFor(() => findMsg(0x11, 22), 3000);
+  log(r11 ? 'live mode enabled (0x11 ok)' : '0x11 — no reply (streaming anyway)');
   return key;
 }
 
@@ -190,14 +213,22 @@ async function main() {
   for (const [u, chans] of universes) {
     const lit = [...chans.entries()].filter(([, v]) => v).map(([i, v]) => `ch${i + 1}=${v}`);
     log(`universe ${u}: ${lit.join(' ') || '(all 0)'}`);
-    // send the frame several times — UDP is lossy, the Stick wants a stream
-    for (let i = 0; i < 12; i++) {
+  }
+  // stream the frame(s) for a few seconds at ~28 Hz, matching HWM's tame
+  // stream. The Stick wants a live stream; the last frame before our clean
+  // disconnect is the one it latches.
+  const STREAM_MS = Number(process.env.STREAM_MS || 3000);
+  const deadline = Date.now() + STREAM_MS;
+  let nFrames = 0;
+  while (Date.now() < deadline) {
+    for (const [u, chans] of universes) {
       const frame = buildFrame(key, chans, u);
       await new Promise((res) => udp.send(frame, UDP_DST_PORT, ip, () => res()));
-      await sleep(35);   // ~28 Hz, matching HWM's tame stream
+      nFrames++;
     }
+    await sleep(35);
   }
-  log('frames sent');
+  log(`streamed ${nFrames} frames over ${STREAM_MS}ms`);
 
   udp.close();
   // clean TCP disconnect → the Stick latches the last DMX values
