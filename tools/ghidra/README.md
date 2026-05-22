@@ -108,13 +108,28 @@ xcrun dyld_info -fixups <binary> | grep 'rebase  0x100970DC0$'
 # Each result is a vtable's typeinfo_ptr field; vt[0] is +8.
 ```
 
+## KDF — SOLVED (2026-05-21)
+
+The per-session AES-256 key derivation is fully recovered by static RE.
+Scripts `dump-kdf-chain.py`, `dump-curve.py`, `dump-secret.py` decompile the
+chain `FUN_100178030 → FUN_100107650`. Result:
+
+- **Curve = NIST P-256.** `p`, `n`, `G`, and the `b` constant all byte-match.
+- **KDF:** `key = LE( X(d·S) XOR X(d·Q) )` — `d` ephemeral, `S` a hardcoded
+  static point, `Q` the Stick pubkey from the opcode-0x0F handshake.
+- **Reference impl:** `tools/derive-dmx-key.mjs` (with passing self-test).
+
+Ghidra shows the curve-constant DATs as zero — its `__const`/`__data` blocks
+weren't materialized. Read them straight from the Mach-O file:
+`file_offset = vmaddr − 0x100000000`. Full write-up:
+`memory/stick-cipher-is-stream-not-aes.md`.
+
 ## What's left
 
-1. **Cipher state initialization** — where does the 8-word state at
-   `cryptObj+0x24..0x44` come from? Static constants, RNG, or derived
-   from the TCP/2431 handshake. Trace the constructor that writes
-   the Stick3 vptr value `0x100962BE8`.
+1. **Live verification** — confirm a key derived by `derive-dmx-key.mjs`
+   actually decrypts a captured 576-byte UDP frame (LE/BE + the 0x0F wire
+   layout are read off the decompiler, not yet checked against the wire).
 2. **Session-magic table** — `DAT_100d11a90` is a table of 14-byte entries.
-   Decode it.
+   Decode it (frame `+0x00` magic + handshake validation).
 3. **Random nonce source** — `FUN_100108670` (likely `std::mt19937`).
    Either reproduce or pick our own.
