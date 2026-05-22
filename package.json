@@ -1,0 +1,38 @@
+{
+  "name": "homebridge-stick-de3",
+  "displayName": "WAC DMX via Stick-DE3",
+  "version": "0.0.1",
+  "description": "Control WAC Lighting DC-WD05 fixtures via Nicolaudie Stick-DE3 DMX controller",
+  "license": "Apache-2.0",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ecopoesis/homebridge-stick-de3.git"
+  },
+  "engines": {
+    "node": ">=18.15.0",
+    "homebridge": ">=1.5.0"
+  },
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "rimraf ./dist && tsc",
+    "watch": "npm run build && npm link && nodemon",
+    "probe": "npm run build && node dist/cli/probe.js",
+    "stick": "npm run build && node dist/cli/stick-de3.js"
+  },
+  "keywords": [
+    "homebridge-plugin",
+    "dmx",
+    "nicolaudie",
+    "stick-de3",
+    "wac"
+  ],
+  "devDependencies": {
+    "@types/node": "^18.0.0",
+    "homebridge": "^1.5.0",
+    "rimraf": "^3.0.2",
+    "typescript": "^5.0.0"
+  },
+  "types": "./dist/index.d.ts",
+  "author": "Mike Roberts"
+}
