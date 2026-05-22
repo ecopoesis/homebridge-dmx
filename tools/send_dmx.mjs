@@ -33,6 +33,10 @@ const MAGIC = Buffer.from('Stick_3A');
 const LSAG = Buffer.from('LSAG_ALL');
 // the 16-byte internal plaintext header — a fixed constant (RE-confirmed)
 const P0 = Buffer.from('5b4e99da9685ad976c432b0a7ff9ffcc', 'hex');
+// HMAC-SHA256 key for the 0x48 TCP-auth handshake — an internal Hardware
+// Manager constant ("#h.6xcKsGD{y}-z"), extracted at runtime via
+// tools/hmac-key.sh and verified against a captured HWM handshake.
+const AUTH_KEY = Buffer.from('23682e3678634b7347447b797d2d7a', 'hex');
 // the Stick's static 0x0F pubkey (constant across every observed session);
 // used as a fallback if the live 0x0F reply can't be parsed.
 const Q_FALLBACK = Buffer.from(
@@ -96,9 +100,12 @@ function waitFor(predicate, timeoutMs) {
 }
 
 // ── the DMX frame builder (verified format) ─────────────────────────────────
-let fieldCtr = 1, seqCtr = 0;
+let seqCtr = 0;
 function buildFrame(key, channels512, port) {
-  const fieldA = Buffer.alloc(8); fieldA.writeUInt16LE((fieldCtr += 3) & 0xffff, 0);
+  // fieldA (+0x0a) is the SAME session message counter as the TCP tokens —
+  // the UDP DMX frames continue the sequence. A counter that jumps backwards
+  // (a separate low-valued counter) makes the Stick drop every frame.
+  const fieldA = token();
   const nonce = crypto.randomBytes(8);
   const iv = Buffer.concat([fieldA, nonce]);                       // 16-byte CBC IV
   const plain = Buffer.concat([P0, Buffer.from(channels512), Buffer.alloc(16)]); // 544
@@ -123,42 +130,53 @@ const log = (...a) => console.log('  ', ...a);
 async function handshake(sock) {
   attachReader(sock);
 
-  // 1. 0x47 — LSAG_ALL key-exchange request
+  // 1. 0x47 — LSAG_ALL hello; the Stick replies with its 32-byte handshake key
   sock.write(msg(LSAG, 0x47, token()));
   const r47 = await waitFor(() => findMsg(0x47, 54), 3000);
-  let stickX25519 = crypto.randomBytes(32);
+  let stickKey = Buffer.alloc(32);
   if (r47 != null) {
-    stickX25519 = r47.subarray(0x16, 0x36);   // Stick handshake key, 32 bytes
+    stickKey = Buffer.from(r47.subarray(0x16, 0x36));   // Stick handshake key
     log('0x47 ok — got Stick handshake key');
   } else log('0x47 — no reply (continuing)');
 
-  // 2. 0x48 — software name ‖ stick pub (echoed) ‖ our X25519 pubkey.
-  //    fw2+ requires TCP auth: this is a real X25519 ECDH. The 0x48 reply
-  //    status is 0 only for a valid public key — random bytes => 100 (the
-  //    Stick then never promotes the connection to a live control session).
+  // 2. 0x48 — authenticated handshake. The message is
+  //      magic(8) ‖ 0x48 ‖ token(8) ‖ softwareName(32) ‖ stickKey(32)
+  //    followed by HMAC-SHA256(AUTH_KEY, that 82-byte head). The Stick
+  //    verifies the HMAC; a bad one => reply status 100 (PermissionDenied)
+  //    and the session is never promoted to a live control session.
   const software = Buffer.alloc(32); software.write('software');
-  const x25519 = crypto.generateKeyPairSync('x25519');
-  const ourX25519 = Buffer.from(
-    x25519.publicKey.export({ type: 'spki', format: 'der' }).subarray(-32));
-  sock.write(msg(LSAG, 0x48, token(), software, stickX25519, ourX25519));
+  const head48 = msg(LSAG, 0x48, token(), software, stickKey);   // 82 bytes
+  const mac48 = crypto.createHmac('sha256', AUTH_KEY).update(head48).digest();
+  sock.write(Buffer.concat([head48, mac48]));                    // 114 bytes
   const r48 = await waitFor(() => findMsg(0x48, 22), 2000);
   if (r48) {
     const st = r48.readUInt32LE(0x12);
     log(`0x48 auth status: ${st}` + (st === 0 ? ' (ok)' : ' (REJECTED)'));
   } else log('0x48 — no reply');
 
-  // 3. observed pre-DMX chatter (replayed; payloads as captured)
-  sock.write(msg(MAGIC, 0x46, Buffer.alloc(4)));
-  sock.write(msg(MAGIC, 0x09, Buffer.from('14000000', 'hex')));
-  sock.write(msg(MAGIC, 0x09, Buffer.from('14000000', 'hex')));
-  sock.write(msg(MAGIC, 0x00, Buffer.from('14000000', 'hex')));
-  sock.write(msg(MAGIC, 0x011c, token(), Buffer.from('01001600', 'hex')));
-  sock.write(msg(MAGIC, 0x05, Buffer.from('0200', 'hex')));
-  await sleep(200);
+  // 3. observed pre-DMX chatter — sent ONE AT A TIME. HWM never batches these;
+  //    a single coalesced TCP segment leaves the Stick without sending its
+  //    0xc9 status, i.e. it never registers the session as a live client.
+  for (const m of [
+    msg(MAGIC, 0x46, Buffer.alloc(4)),
+    msg(MAGIC, 0x09, Buffer.from('14000000', 'hex')),
+    msg(MAGIC, 0x09, Buffer.from('14000000', 'hex')),
+    msg(MAGIC, 0x00, Buffer.from('14000000', 'hex')),
+    msg(MAGIC, 0x011c, token(), Buffer.from('01001600', 'hex')),
+    msg(MAGIC, 0x05, Buffer.from('0200', 'hex')),
+  ]) {
+    sock.write(m);
+    await sleep(140);   // separate segment + let the Stick reply
+  }
+  if (findMsg(0x00c9, 18)) log('0xc9 status received — Stick registered the session');
 
-  // 4. 0x10 — crypto-state query
+  // 4. 0x10 — crypto-state query. HWM sees state 3 on a fresh device; state 4
+  //    means a DMX key from a previous session is still latched.
+  rxBuf = Buffer.alloc(0);
   sock.write(msg(MAGIC, 0x10, token()));
-  await sleep(150);
+  const r10 = await waitFor(() => findMsg(0x10, 22), 2000);
+  if (r10) log(`0x10 crypto state: ${r10.readUInt32LE(0x12)}`);
+  rxBuf = Buffer.alloc(0);
 
   // 5. 0x0F — the DMX key exchange: send our P-256 ephemeral pubkey
   const ecdh = makeEphemeral();
@@ -175,16 +193,34 @@ async function handshake(sock) {
   const key = deriveDmxKey(ecdh, wireToPoint(Qwire));
   log('DMX key derived:', key.toString('hex'));
 
+  // 6b. device sync. After 0x0F, HWM does 0x10, three 0x71 parameter reads,
+  //     then ~252 0x70 reads (it pulls the showfile/SD image). The Stick
+  //     appears to gate live DMX on a client that has performed this sync,
+  //     so replicate it: 0x71 params + a sequential 0x70 sector download.
+  sock.write(msg(MAGIC, 0x10, token())); await sleep(120);
+  for (const p of ['0200000000', '0100000000', '0000000000']) {
+    sock.write(msg(MAGIC, 0x71, token(), Buffer.from(p, 'hex')));
+    await sleep(80);
+  }
+  log('0x70 device download (256 sectors) …');
+  for (let sec = 0; sec < 256; sec++) {
+    const body = Buffer.alloc(5);
+    body.writeUInt32LE(sec, 0);
+    body[4] = 1;
+    sock.write(msg(MAGIC, 0x70, token(), body));
+    await sleep(12);
+    if ((sec & 0x1f) === 0x1f) rxBuf = Buffer.alloc(0);   // keep rxBuf bounded
+  }
+  await sleep(200);
+  rxBuf = Buffer.alloc(0);
+
   // 7. enter live mode. In the captured HWM session the DMX stream begins
   //    only after this 0x75/0x74/0x2e/0x10/0x11 sequence; the long 0x70
   //    showfile download HWM does in between is editor-only and is skipped.
-  sock.write(msg(MAGIC, 0x75, token()));
-  sock.write(msg(MAGIC, 0x74, token()));
-  await sleep(150);
-  sock.write(msg(MAGIC, 0x2e, Buffer.alloc(32)));        // 0x2e: 32-byte payload, no token
-  await sleep(150);
-  sock.write(msg(MAGIC, 0x10, token()));
-  await sleep(150);
+  sock.write(msg(MAGIC, 0x75, token())); await sleep(140);
+  sock.write(msg(MAGIC, 0x74, token())); await sleep(140);
+  sock.write(msg(MAGIC, 0x2e, Buffer.alloc(32))); await sleep(140);  // 0x2e: 32B payload, no token
+  sock.write(msg(MAGIC, 0x10, token())); await sleep(140);
   sock.write(msg(MAGIC, 0x11, token()));                 // "go live"
   const r11 = await waitFor(() => findMsg(0x11, 22), 3000);
   log(r11 ? 'live mode enabled (0x11 ok)' : '0x11 — no reply (streaming anyway)');
@@ -214,21 +250,33 @@ async function main() {
     const lit = [...chans.entries()].filter(([, v]) => v).map(([i, v]) => `ch${i + 1}=${v}`);
     log(`universe ${u}: ${lit.join(' ') || '(all 0)'}`);
   }
-  // stream the frame(s) for a few seconds at ~28 Hz, matching HWM's tame
-  // stream. The Stick wants a live stream; the last frame before our clean
-  // disconnect is the one it latches.
-  const STREAM_MS = Number(process.env.STREAM_MS || 3000);
+  // stream the frame(s) at ~28 Hz while keeping the live session alive with a
+  // TCP 0x1a heartbeat every ~1s (HWM does this the whole time it streams —
+  // without it the Stick stops honouring the UDP stream). 0x10 once first.
+  sock.write(msg(MAGIC, 0x10, token()));
+  const STREAM_MS = Number(process.env.STREAM_MS || 6000);
   const deadline = Date.now() + STREAM_MS;
-  let nFrames = 0;
+  let nFrames = 0, beats = 0, lastBeat = Date.now();
   while (Date.now() < deadline) {
     for (const [u, chans] of universes) {
       const frame = buildFrame(key, chans, u);
       await new Promise((res) => udp.send(frame, UDP_DST_PORT, ip, () => res()));
       nFrames++;
     }
+    if (Date.now() - lastBeat >= 1000) {
+      rxBuf = Buffer.alloc(0);
+      sock.write(msg(MAGIC, 0x1a, token(), Buffer.alloc(4)));   // streaming heartbeat
+      const hb = await waitFor(() => findMsg(0x1a, 44), 800);
+      // the 0x1a reply carries the Stick's DMX frame counter at +0x24 — if it
+      // climbs while we stream, the Stick is receiving our UDP frames.
+      if (hb) log(`heartbeat ${beats}: Stick DMX frame counter = ${hb.readUInt32LE(0x24)}`);
+      else log(`heartbeat ${beats}: no reply`);
+      lastBeat = Date.now();
+      beats++;
+    }
     await sleep(35);
   }
-  log(`streamed ${nFrames} frames over ${STREAM_MS}ms`);
+  log(`streamed ${nFrames} frames + ${beats} heartbeats over ${STREAM_MS}ms`);
 
   udp.close();
   // clean TCP disconnect → the Stick latches the last DMX values
