@@ -75,6 +75,12 @@ const msg = (magic, opcode, ...parts) => {
   return Buffer.concat([magic, op, ...parts]);
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Inter-message gap during the handshake chatter. Older note claimed each
+// TCP write needs to land as a SEPARATE segment for the Stick to process it
+// (otherwise no 0xc9 status). 2026-05-23: user-tested down to CHATTER_MS=5
+// — every value latched and the 0xc9 still arrives. Theory was wrong (or
+// the real floor is way below scheduler tick). Default 10ms for margin.
+const CHATTER_MS = Number(process.env.CHATTER_MS || 10);
 
 // All received TCP bytes accumulate here for the life of the connection, so a
 // reply already sitting in the buffer is never missed.
@@ -214,7 +220,7 @@ async function handshake(sock) {
     msg(MAGIC, 0x05, Buffer.from('0200', 'hex')),
   ]) {
     sock.write(m);
-    await sleep(140);   // separate segment + let the Stick reply
+    await sleep(CHATTER_MS);
   }
   if (findMsg(0x00c9, 18)) log('0xc9 status received — Stick registered the session');
 
@@ -255,9 +261,9 @@ async function handshake(sock) {
   //       0x10, 0x75, 0x74, 0x71×3, 0x70 download, 0x2e
   //     The earlier code did 0x75/0x74 AFTER the download and sent the wrong
   //     third 0x71 param — both now corrected.
-  sock.write(msg(MAGIC, 0x10, token())); await sleep(120);
-  sock.write(msg(MAGIC, 0x75, token())); await sleep(140);
-  sock.write(msg(MAGIC, 0x74, token())); await sleep(140);
+  sock.write(msg(MAGIC, 0x10, token())); await sleep(CHATTER_MS);
+  sock.write(msg(MAGIC, 0x75, token())); await sleep(CHATTER_MS);
+  sock.write(msg(MAGIC, 0x74, token())); await sleep(CHATTER_MS);
   // HWM's 0x71 params (from the 2026-05-23 mirror capture of a working
   // session): FOUR reads — 0200000000, 0100000000, 0100000000, 02b37f0000.
   // The 4th was missing in the earlier code (only seen via the port mirror
@@ -266,7 +272,7 @@ async function handshake(sock) {
   // we never did, so include it.
   for (const p of ['0200000000', '0100000000', '0100000000', '02b37f0000']) {
     sock.write(msg(MAGIC, 0x71, token(), Buffer.from(p, 'hex')));
-    await sleep(80);
+    await sleep(CHATTER_MS);
   }
   // 0x70 sector downloads — HWM reads sector 0 + sectors 63..185 (124 reads)
   // to populate its commissioning UI. 2026-05-23: user-tested SECTORS=0 (skip
@@ -295,9 +301,9 @@ async function handshake(sock) {
   // 7. enter live mode: 0x2e, then a settle gap, then 0x10/0x11/0x10. HWM
   //    waits ~3.7 s between 0x2e and 0x10/0x11 (UI-paced); we use a much
   //    shorter settle. SETTLE_2E_MS tunable (default 800).
-  sock.write(msg(MAGIC, 0x2e, Buffer.alloc(32))); await sleep(140);
+  sock.write(msg(MAGIC, 0x2e, Buffer.alloc(32))); await sleep(CHATTER_MS);
   await sleep(Number(process.env.SETTLE_2E_MS || 50));
-  sock.write(msg(MAGIC, 0x10, token())); await sleep(140);
+  sock.write(msg(MAGIC, 0x10, token())); await sleep(CHATTER_MS);
   sock.write(msg(MAGIC, 0x11, token()));                 // "go live"
   const r11 = await waitFor(() => findMsg(0x11, 22), 3000);
   log(r11 ? 'live mode enabled (0x11 ok)' : '0x11 — no reply (streaming anyway)');
