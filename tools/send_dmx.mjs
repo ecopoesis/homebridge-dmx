@@ -268,26 +268,35 @@ async function handshake(sock) {
     sock.write(msg(MAGIC, 0x71, token(), Buffer.from(p, 'hex')));
     await sleep(80);
   }
-  // exact 0x70 sequence HWM session 64448 sends: sector 0, then 63..185
-  // (124 reads, flag byte = 1). The earlier 0..255 sequential read diverged.
-  const sectors = [0];
-  for (let s = 63; s <= 185; s++) sectors.push(s);
-  log(`0x70 device download (${sectors.length} sectors, HWM-exact) …`);
-  for (let i = 0; i < sectors.length; i++) {
-    const body = Buffer.alloc(5);
-    body.writeUInt32LE(sectors[i], 0);
-    body[4] = 1;
-    sock.write(msg(MAGIC, 0x70, token(), body));
-    await sleep(12);
-    if ((i & 0x1f) === 0x1f) rxBuf = Buffer.alloc(0);   // keep rxBuf bounded
+  // 0x70 sector downloads — HWM reads sector 0 + sectors 63..185 (124 reads)
+  // to populate its commissioning UI. 2026-05-23: user-tested SECTORS=0 (skip
+  // entirely) → still latches. So this is purely HWM UI chatter, not a Stick
+  // precondition for go-live. Default OFF (saves ~1.5 s).
+  //   SECTORS=N — read the first N entries of the HWM list (0 disables)
+  //   SECTORS=124 — full HWM-exact list
+  const N = process.env.SECTORS != null ? Number(process.env.SECTORS) : 0;
+  if (N > 0) {
+    const fullSectors = [0];
+    for (let s = 63; s <= 185; s++) fullSectors.push(s);
+    const sectors = fullSectors.slice(0, N);
+    log(`0x70 device download (${sectors.length} sectors) …`);
+    for (let i = 0; i < sectors.length; i++) {
+      const body = Buffer.alloc(5);
+      body.writeUInt32LE(sectors[i], 0);
+      body[4] = 1;
+      sock.write(msg(MAGIC, 0x70, token(), body));
+      await sleep(12);
+      if ((i & 0x1f) === 0x1f) rxBuf = Buffer.alloc(0);
+    }
+    await sleep(200);
   }
-  await sleep(200);
   rxBuf = Buffer.alloc(0);
 
   // 7. enter live mode: 0x2e, then a settle gap, then 0x10/0x11/0x10. HWM
-  //    waits ~3.7 s between 0x2e and 0x10/0x11; we use a shorter settle.
-  sock.write(msg(MAGIC, 0x2e, Buffer.alloc(32))); await sleep(140);  // 0x2e: 32B payload, no token
-  await sleep(800);                                      // settle (HWM gap)
+  //    waits ~3.7 s between 0x2e and 0x10/0x11 (UI-paced); we use a much
+  //    shorter settle. SETTLE_2E_MS tunable (default 800).
+  sock.write(msg(MAGIC, 0x2e, Buffer.alloc(32))); await sleep(140);
+  await sleep(Number(process.env.SETTLE_2E_MS || 50));
   sock.write(msg(MAGIC, 0x10, token())); await sleep(140);
   sock.write(msg(MAGIC, 0x11, token()));                 // "go live"
   const r11 = await waitFor(() => findMsg(0x11, 22), 3000);
@@ -369,11 +378,14 @@ async function main() {
   udp24299.close();                                     // done with it — prevents process hang
   await sleep(200);
 
-  // ── PROBE CONNECTION ──
+  // ── PROBE CONNECTION (opt-in) ──
   // HWM opens a throwaway TCP/2431 session that does auth + 0x00/0xc9 +
-  // 0x011c + 0x07b + clean close, BEFORE the real go-live connection. The
-  // token counter continues across both connections. Skip with SKIP_PROBE=1.
-  if (process.env.SKIP_PROBE !== '1') {
+  // 0x011c + 0x07b + clean close, BEFORE the real go-live connection.
+  // 2026-05-23: tested SKIP_PROBE=1 vs the probe-included path — identical
+  // outcome. The probe is HWM UI chatter, NOT a Stick precondition. Default
+  // OFF (saves ~3-4 s per transaction). Enable for wire-faithfulness with
+  // RUN_PROBE=1.
+  if (process.env.RUN_PROBE === '1') {
     const probe = net.createConnection({ host: ip, port: TCP_PORT });
     probe.on('error', (e) => { console.error('probe TCP error:', e.message); process.exit(1); });
     probe.setTimeout(5000);
@@ -392,7 +404,7 @@ async function main() {
     // Anything > a few ms should be fine. Configurable via PROBE_GAP_MS.
     await sleep(Number(process.env.PROBE_GAP_MS || 800));
   } else {
-    log('SKIP_PROBE=1 — skipping probe connection');
+    log('probe skipped (set RUN_PROBE=1 to include HWM-style probe connection)');
   }
 
   // ── GO-LIVE CONNECTION ──
