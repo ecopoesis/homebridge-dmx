@@ -1,8 +1,23 @@
-# homebridge-wac-dmx
+# @ecopoesis/homebridge-dmx
 
-Homebridge plugin to control WAC Lighting CUBE Architectural DC-WD05 fixtures via a Nicolaudie Stick-DE3 DMX controller.
+Homebridge platform plugin that exposes DMX fixtures as HomeKit Lightbulb accessories. The DMX controller is abstracted (config has a `controllers[]` section + `type` field) so additional controllers can be added later without rewriting the patch; the supported controller today is the **Nicolaudie Stick-DE3**, reverse-engineered from the ESA2 Hardware Manager.
 
-## Architecture
+Published to npm as **`@ecopoesis/homebridge-dmx`** (scoped because the unscoped `homebridge-dmx` is squatted on npm by an abandoned 2019 package). Homebridge alias is `DMX`.
+
+## Plugin architecture (2026-05-24)
+
+- Top-level platform `DmxPlatform` reads `controllers[]`, `profiles[]`, `patch[]` from config (or external YAML via `yamlPath`)
+- One `StickController` per controller spec; one `StickFixture` (Lightbulb accessory) per patch entry, wired to its controller
+- HomeKit set → render bytes via the fixture's color model → write to universe buffer → debounce (750 ms) → spawn `tools/send_dmx.mjs` as a child process per transaction
+- Subprocess approach: empirical workaround — in-process protocol only works for the FIRST transaction per long-lived plugin process; sessions 2+ silently fail to drive output. Fresh node process per transaction reliably works. Cost: ~1.5-2 s per change.
+- Color models: dimmer, cct, rgb, rgbw, rgbww, rgbaw, hsvcct (the WAC native model)
+- `tools/send_dmx.mjs` is now structurally critical (frozen reference shipped in the npm tarball)
+
+## Current deployment
+
+Running on `homebridge01.local` (192.168.16.40) in a `homebridge/homebridge:latest` docker container managed by Portainer + Watchtower. Config volume bind-mounted at `/opt/containers/homebridge` → `/homebridge` inside the container. All 18 WAC fixtures patched at universe A, DMX 1/6/11/.../86.
+
+## Architecture (RE / hardware context)
 
 - 18x WAC DC-WD05 fixtures on a DMX chain
 - Nicolaudie Stick-DE3 wall-mount DMX controller at 192.168.96.2
