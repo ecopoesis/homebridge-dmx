@@ -32,7 +32,12 @@ const UDP_DST_PORT = 2431;
 const UDP_SRC_PORT = 2430;
 const MAGIC = Buffer.from('Stick_3A');
 const LSAG = Buffer.from('LSAG_ALL');
-// the 16-byte internal plaintext header — a fixed constant (RE-confirmed)
+// the 16-byte internal plaintext header — a fixed constant (RE-confirmed).
+// Plaintext layout, empirically verified 2026-05-23 against a working HWM
+// frame: [P0 (16)][header2 (16, observed zero)][512 DMX channels]. NOT
+// [P0][512 channels][trailer] as the decrypt-dmx.mjs zero-ratio test had
+// suggested (channel position is invisible to a zero-ratio metric on a
+// near-empty stream). The DMX channels start at plaintext offset 32.
 const P0 = Buffer.from('5b4e99da9685ad976c432b0a7ff9ffcc', 'hex');
 // HMAC-SHA256 key for the 0x48 TCP-auth handshake — an internal Hardware
 // Manager constant ("#h.6xcKsGD{y}-z"), extracted at runtime via
@@ -109,7 +114,9 @@ function buildFrame(key, channels512, port) {
   const fieldA = token();
   const nonce = crypto.randomBytes(8);
   const iv = Buffer.concat([fieldA, nonce]);                       // 16-byte CBC IV
-  const plain = Buffer.concat([P0, Buffer.from(channels512), Buffer.alloc(16)]); // 544
+  // CORRECTED 2026-05-23: channels go at offset 32, NOT offset 16. Putting them
+  // at +16 produced an off-by-16 mismatch (our ch 22 lit HWM's ch 6 = bow A-down).
+  const plain = Buffer.concat([P0, Buffer.alloc(16), Buffer.from(channels512)]); // 544
   const c = crypto.createCipheriv('aes-256-cbc', key, iv);
   c.setAutoPadding(false);
   const body = Buffer.concat([c.update(plain), c.final()]);        // 544
@@ -237,9 +244,10 @@ async function handshake(sock) {
   // verified — proving whether our own frames are validly encrypted.
   try {
     const dHex = ecdh.getPrivateKey('hex');
-    fs.writeFileSync('/tmp/send_dmx-key.txt',
+    const keyPath = process.env.KEY_DUMP || `${process.env.HOME || '.'}/.send_dmx-key.txt`;
+    fs.writeFileSync(keyPath,
       `key=${key.toString('hex')}\nd=${dHex}\nQ=${Qwire.toString('hex')}\n`);
-    log('wrote /tmp/send_dmx-key.txt');
+    log(`wrote ${keyPath}`);
   } catch (e) { log('key dump failed:', e.message); }
 
   // 6b. device sync — replicated to match a captured HWM session BYTE-FOR-BYTE
@@ -406,47 +414,42 @@ async function main() {
     const lit = [...chans.entries()].filter(([, v]) => v).map(([i, v]) => `ch${i + 1}=${v}`);
     log(`universe ${u}: ${lit.join(' ') || '(all 0)'}`);
   }
-  // stream with INDEPENDENT steady timers, mirroring HWM's architecture: HWM
-  // runs the UDP DMX stream on its own rock-steady 25 Hz timer thread, with
-  // the TCP heartbeat on a separate thread. The earlier single-loop coupled
-  // them — it hitched the UDP stream for the heartbeat round-trip every
-  // second and ran at ~27 Hz. A live-stream detector on the Stick may want a
-  // genuine steady 25 Hz; this removes that as a variable.
+  // Transactional streaming: send the smallest number of DMX frames needed
+  // for the Stick to commit the values, then dirty-close so it latches.
+  //
+  // CORRECTED 2026-05-23: latching happens on DIRTY disconnect (or any close
+  // that doesn't send HWM's right-click "goodbye" opcode — we don't know what
+  // that opcode is, but everything ELSE — sock.end(), sock.destroy(), process
+  // kill, cmd-Q — falls into the latch bucket). A clean disconnect via
+  // HWM-right-click DOES NOT latch. The brief blackout-then-return that
+  // happens at disconnect is the Stick's exit-live transition; HWM exhibits
+  // the same flicker, so it's unavoidable at the protocol layer.
+  //
+  // Goal: minimise streaming time. The Stick is unusable from elsewhere while
+  // we hold the TCP/2431 session, so for a Homebridge plugin doing single-
+  // command updates we want to be in-and-out as fast as possible.
   sock.write(msg(MAGIC, 0x10, token()));
-  const STREAM_MS = Number(process.env.STREAM_MS || 20000);
-  let nFrames = 0, beats = 0;
+  const STREAM_MS = Number(process.env.STREAM_MS || 500);   // was 20000; now 500
+  let nFrames = 0;
 
-  const udpTimer = setInterval(() => {                 // 25 Hz, exactly like HWM
+  const udpTimer = setInterval(() => {                       // 25 Hz, like HWM
     for (const [u, chans] of universes) {
       udp.send(buildFrame(key, chans, u), UDP_DST_PORT, ip, () => {});
       nFrames++;
     }
   }, 40);
 
-  const hbTimer = setInterval(() => {                  // 1 Hz TCP keepalive
-    rxBuf = Buffer.alloc(0);
-    sock.write(msg(MAGIC, 0x1a, token(), Buffer.alloc(2)));   // 20-byte heartbeat
-    waitFor(() => findMsg(0x1a, 44), 800).then((hb) => {
-      // the 0x1a reply's last 4 bytes [+0x28] are a flag: HWM sees 1 once it
-      // is the live DMX source; we have only ever seen 0. That flag is the goal.
-      if (hb) log(`heartbeat ${beats++}: liveFlag[+0x28]=${hb.readUInt32LE(40)} ` +
-                  `counter[+0x26]=${hb.readUInt32LE(38)}`);
-      else log(`heartbeat ${beats++}: no reply`);
-    });
-  }, 1000);
-
-  const p12Timer = setInterval(() => {                 // HWM's ~0.1 Hz 0x12 poll
-    sock.write(msg(MAGIC, 0x12, token()));
-  }, 10000);
-
   await sleep(STREAM_MS);
-  clearInterval(udpTimer); clearInterval(hbTimer); clearInterval(p12Timer);
-  log(`streamed ${nFrames} frames + ${beats} heartbeats over ${STREAM_MS}ms`);
+  clearInterval(udpTimer);
+  log(`streamed ${nFrames} frames over ${STREAM_MS}ms`);
 
+  // DIRTY-close: socket.destroy() sends RST (no FIN handshake). This is what
+  // produces the latch — the Stick treats it as "client died, hold last
+  // values". A FIN-based sock.end() empirically also latches today because we
+  // don't send HWM's polite-goodbye opcode, but destroy() removes the ambiguity.
   udp.close();
-  // clean TCP disconnect → the Stick latches the last DMX values
-  await new Promise((res) => sock.end(res));
-  log('disconnected cleanly — Stick should hold the values');
+  sock.destroy();
+  log('disconnected (RST) — Stick should hold the last value');
 }
 
 main().catch((e) => { console.error('failed:', e.message); process.exit(1); });
