@@ -17,6 +17,7 @@ import type {
 import { Controller, LoadedConfig, loadConfig, RawConfig } from './config.js';
 import { StickController } from './controller.js';
 import { StickFixture } from './platformAccessory.js';
+import { StateRegistry } from './stateRegistry.js';
 import { ZoneFixture } from './zoneAccessory.js';
 import { PLATFORM_NAME, PLUGIN_NAME } from './settings.js';
 
@@ -27,6 +28,7 @@ export class DmxPlatform implements DynamicPlatformPlugin {
 
   private cfg: LoadedConfig | null = null;
   private controllers = new Map<string, StickController>();
+  private registry = new StateRegistry();
 
   constructor(
     public readonly log: Logger,
@@ -96,12 +98,12 @@ export class DmxPlatform implements DynamicPlatformPlugin {
       if (existing) {
         this.log.debug(`wiring cached accessory ${fx.id}`);
         existing.context.fixture = { id: fx.id, controllerId: fx.controller.id };
-        new StickFixture(this, existing, fx, controller);
+        new StickFixture(this, existing, fx, controller, this.registry);
       } else {
         this.log.info(`registering new accessory: ${fx.name} (${fx.id})`);
         const accessory = new this.api.platformAccessory(fx.name, uuid);
         accessory.context.fixture = { id: fx.id, controllerId: fx.controller.id };
-        new StickFixture(this, accessory, fx, controller);
+        new StickFixture(this, accessory, fx, controller, this.registry);
         this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
         this.accessories.push(accessory);
       }
@@ -115,12 +117,12 @@ export class DmxPlatform implements DynamicPlatformPlugin {
       if (existing) {
         this.log.debug(`wiring cached zone ${zone.id}`);
         existing.context.zone = { id: zone.id };
-        new ZoneFixture(this, existing, zone, this.controllers);
+        new ZoneFixture(this, existing, zone, this.controllers, this.registry);
       } else {
         this.log.info(`registering new zone: ${zone.name} (${zone.id}, ${zone.members.length} members)`);
         const accessory = new this.api.platformAccessory(zone.name, uuid);
         accessory.context.zone = { id: zone.id };
-        new ZoneFixture(this, accessory, zone, this.controllers);
+        new ZoneFixture(this, accessory, zone, this.controllers, this.registry);
         this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
         this.accessories.push(accessory);
       }
