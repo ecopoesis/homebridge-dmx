@@ -8,6 +8,28 @@ stream, reverse-engineered from the ESA2 Hardware Manager).
 
 [![npm](https://img.shields.io/npm/v/@ecopoesis/homebridge-dmx.svg)](https://www.npmjs.com/package/@ecopoesis/homebridge-dmx)
 
+## Nicolaudie Stick-DE3
+
+Please, under no circumstances, should you buy a Nicolaudie Stick-DE3 because this plugin exists.
+
+The Stick-DE3 hardware, and its accompanying software, are some of the worst I have had the misfortune to use.
+
+Some of the litany of problems with the Stick-DE3 ecosystem:
+* The Stick does not support power-over-ethernet. It takes power over an Ethernet (8P8C) shaped port, but it's non-standard.
+* The Stick touchscreen is very touchy. And not in a good way. Phantom clicks, slow responsiveness: all the problems from pre-iPhone touchscreens are here. I believe I've clicked buttons by looking at it too hard.
+* Every setting change also changes the MAC address. Hope you didn't want to give it a static address via DHCP.
+* HSV-style color spaces are not supported at all. Except: look at the color-wheel. It's in HSV. So they do support converting from HSV to RGB or various RGB+W derivatives, but can't pass the native values their controller's UI generates straight through to DMX channels.
+* The software suite is ancient and terrible. ESA Pro, ESA Pro 2, and Hardware Manager all only support x86 on MacOS. In 2026. Apple Silicon came out 6 years ago!
+* The software has a UI that would have looked dated in Windows 95.
+* Why is there so much encryption? This is my hardware. Nicolaudie sensibly ships a way to turn off IoT access, making this a pure NoT ("Network of Things") device. Let me talk to it.
+* Why do you make a DMX interface without simple channel control? It'd be great if I could use this as intended, but since it doesn't support HSV-style color, give me an easy escape hatch. You have a (poorly) documented API. Just add the ability for me to send a DMX packet. I shouldn't need to break AES to do that.
+
+That said, this plugin does just that. Reusing the encryption scheme used by Hardware Manager (with keys extracted from the binary) lets us send the same type of per-channel control used there. We then cleanly disconnect; the Stick latches the last frame, with a brief wall-controller blink as a side effect.
+
+`send_dmx.mjs` is the pieces of the protocol needed to authenticate and start streaming, including the keys extracted from Hardware Manager. Other files in `tools` are the code developed to get to that point.
+
+If you, like me, bought a Stick-DE3 based on the assumption that it was competently executed and are now stuck with it, hopefully this repo and the research it contains can help you actually make it useful.
+
 ## Status
 
 | Piece | State |
