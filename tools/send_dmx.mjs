@@ -128,32 +128,72 @@ function buildFrame(key, channels512, port) {
 // ── main ────────────────────────────────────────────────────────────────────
 const log = (...a) => console.log('  ', ...a);
 
-async function handshake(sock) {
-  attachReader(sock);
-
-  // 1. 0x47 — LSAG_ALL hello; the Stick replies with its 32-byte handshake key
+// Run the auth step (0x47 + 0x48) on a freshly opened TCP/2431 socket.
+// Returns the 32-byte Stick handshake key (from the 0x47 reply) and logs the
+// 0x48 status. Used both by the probe connection and the go-live connection.
+async function doAuth(sock, tag) {
+  // 0x47 — LSAG_ALL hello; the Stick replies with its 32-byte handshake key
   sock.write(msg(LSAG, 0x47, token()));
   const r47 = await waitFor(() => findMsg(0x47, 54), 3000);
   let stickKey = Buffer.alloc(32);
   if (r47 != null) {
-    stickKey = Buffer.from(r47.subarray(0x16, 0x36));   // Stick handshake key
-    log('0x47 ok — got Stick handshake key');
-  } else log('0x47 — no reply (continuing)');
+    stickKey = Buffer.from(r47.subarray(0x16, 0x36));
+    log(`${tag} 0x47 ok — got Stick handshake key`);
+  } else log(`${tag} 0x47 — no reply (continuing)`);
 
-  // 2. 0x48 — authenticated handshake. The message is
-  //      magic(8) ‖ 0x48 ‖ token(8) ‖ softwareName(32) ‖ stickKey(32)
-  //    followed by HMAC-SHA256(AUTH_KEY, that 82-byte head). The Stick
-  //    verifies the HMAC; a bad one => reply status 100 (PermissionDenied)
-  //    and the session is never promoted to a live control session.
+  // 0x48 — authenticated handshake. The message is
+  //   magic(8) ‖ 0x48 ‖ token(8) ‖ softwareName(32) ‖ stickKey(32)
+  // followed by HMAC-SHA256(AUTH_KEY, the 82-byte head). The Stick verifies
+  // the HMAC; a bad one ⇒ reply status 100 (PermissionDenied) and the
+  // session is never promoted to a live control session.
   const software = Buffer.alloc(32); software.write('software');
-  const head48 = msg(LSAG, 0x48, token(), software, stickKey);   // 82 bytes
+  const head48 = msg(LSAG, 0x48, token(), software, stickKey);
   const mac48 = crypto.createHmac('sha256', AUTH_KEY).update(head48).digest();
-  sock.write(Buffer.concat([head48, mac48]));                    // 114 bytes
+  sock.write(Buffer.concat([head48, mac48]));
   const r48 = await waitFor(() => findMsg(0x48, 22), 2000);
   if (r48) {
     const st = r48.readUInt32LE(0x12);
-    log(`0x48 auth status: ${st}` + (st === 0 ? ' (ok)' : ' (REJECTED)'));
-  } else log('0x48 — no reply');
+    log(`${tag} 0x48 auth status: ${st}` + (st === 0 ? ' (ok)' : ' (REJECTED)'));
+  } else log(`${tag} 0x48 — no reply`);
+  return stickKey;
+}
+
+// HWM-observed pattern: BEFORE the go-live TCP connection, HWM opens a
+// short-lived PROBE connection that does auth → 0x00/0xc9 → 0x011c → 0x07b →
+// clean close. Then a brief gap, then the real go-live connection. Tokens
+// continue across both. The Stick may track "this client warmed up" and only
+// grant live mode after seeing the probe. tools/send_dmx.mjs's earlier
+// behaviour was to open ONE connection for everything, which is the chief
+// remaining wire-level difference vs HWM (see memory note 2026-05-23).
+async function probeHandshake(sock) {
+  attachReader(sock);
+  await doAuth(sock, '[probe]');
+
+  // 0x00 → 0xc9 status registration (same body HWM sends)
+  sock.write(msg(MAGIC, 0x00, Buffer.from('14000000', 'hex')));
+  await waitFor(() => findMsg(0x00c9, 18), 1500);
+  if (findMsg(0x00c9, 18)) log('[probe] 0xc9 received — session registered');
+
+  // 0x011c probe — we now know (2026-05-23) the reply is just AES-encrypted
+  // device-info; we discard it. Sending the request still matters because the
+  // PROBE-then-go-live two-connection dance is the remaining unverified
+  // wire-level theory.
+  sock.write(msg(MAGIC, 0x011c, token(), Buffer.from('01001600', 'hex')));
+  await waitFor(() => findMsg(0x011c, 22), 2000);
+  log('[probe] 0x011c sent (reply discarded)');
+
+  // 0x07b — license/serial query. Body is just header(18B); the Stick replies
+  // with 39B containing what looks like a license tag (`15f0ff182700…`).
+  sock.write(msg(MAGIC, 0x007b, token()));
+  await waitFor(() => findMsg(0x007b, 22), 1500);
+  log('[probe] 0x07b sent (reply discarded)');
+
+  await sleep(150);     // small settle before the clean close
+}
+
+async function handshake(sock) {
+  attachReader(sock);
+  await doAuth(sock, '[live]');
 
   // 3. observed pre-DMX chatter — sent ONE AT A TIME. HWM never batches these;
   //    a single coalesced TCP segment leaves the Stick without sending its
@@ -321,6 +361,33 @@ async function main() {
   udp24299.close();                                     // done with it — prevents process hang
   await sleep(200);
 
+  // ── PROBE CONNECTION ──
+  // HWM opens a throwaway TCP/2431 session that does auth + 0x00/0xc9 +
+  // 0x011c + 0x07b + clean close, BEFORE the real go-live connection. The
+  // token counter continues across both connections. Skip with SKIP_PROBE=1.
+  if (process.env.SKIP_PROBE !== '1') {
+    const probe = net.createConnection({ host: ip, port: TCP_PORT });
+    probe.on('error', (e) => { console.error('probe TCP error:', e.message); process.exit(1); });
+    probe.setTimeout(5000);
+    await new Promise((res, rej) => {
+      probe.once('connect', res);
+      probe.once('error', rej);
+      probe.once('timeout', () => rej(new Error(`probe: no response from ${ip}:${TCP_PORT}`)));
+    });
+    probe.setTimeout(0);
+    log('probe TCP connected');
+    await probeHandshake(probe);
+    await new Promise((res) => probe.end(res));   // clean close — Stick should hold no state
+    log('probe disconnected cleanly');
+    rxBuf = Buffer.alloc(0);                       // reset for the next connection
+    // HWM's gap between conn-close and the next conn-open is ~1 s (UI-paced).
+    // Anything > a few ms should be fine. Configurable via PROBE_GAP_MS.
+    await sleep(Number(process.env.PROBE_GAP_MS || 800));
+  } else {
+    log('SKIP_PROBE=1 — skipping probe connection');
+  }
+
+  // ── GO-LIVE CONNECTION ──
   const sock = net.createConnection({ host: ip, port: TCP_PORT });
   sock.on('error', (e) => { console.error('TCP error:', e.message); process.exit(1); });
   sock.setTimeout(5000);
@@ -330,7 +397,7 @@ async function main() {
     sock.once('timeout', () => rej(new Error(`no response from ${ip}:${TCP_PORT} (timeout)`)));
   });
   sock.setTimeout(0);
-  log('TCP connected');
+  log('go-live TCP connected');
 
   const key = await handshake(sock);
 
